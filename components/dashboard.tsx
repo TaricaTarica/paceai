@@ -22,6 +22,17 @@ import { SESSION_ICONS, SESSION_COLORS } from "./session-type-styles"
 
 const DAY_LABELS: DayOfWeek[] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
+const WEATHER_CITY = "Montevideo"
+
+interface WttrJ1Current {
+  temp_C?: string
+  weatherDesc?: Array<{ value?: string }>
+}
+
+interface WttrJ1Widget {
+  current_condition?: WttrJ1Current[]
+}
+
 interface DashboardProps {
   plan: TrainingPlan
   onboarding: OnboardingData
@@ -46,6 +57,33 @@ export function Dashboard({ plan, onboarding, onPlanUpdate, onReset }: Dashboard
   const [generatingWeek, setGeneratingWeek] = useState<number | null>(null)
   const [weekGenError, setWeekGenError] = useState<string | null>(null)
   const autoAttemptedWeek = useRef<number | null>(null)
+  const [weatherLine, setWeatherLine] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        // format=3 often returns HTML in browsers; j1 is JSON and stable.
+        const r = await fetch(`https://wttr.in/${encodeURIComponent(WEATHER_CITY)}?format=j1`, {
+          headers: { "User-Agent": "PaceAI/1.0", Accept: "application/json" },
+        })
+        if (!r.ok || cancelled) return
+        const data = (await r.json()) as WttrJ1Widget
+        const cur = data.current_condition?.[0]
+        if (!cur || cancelled) return
+        const desc = cur.weatherDesc?.[0]?.value?.trim() ?? ""
+        const tempRaw = (cur.temp_C ?? "").replace(/^\+/, "")
+        const part = [desc, tempRaw ? `${tempRaw}°C` : ""].filter(Boolean).join(" ")
+        if (!part) return
+        setWeatherLine(`📍 ${WEATHER_CITY} · ${part}`)
+      } catch {
+        if (!cancelled) setWeatherLine(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const week = plan.weeks.find(w => w.weekNumber === currentWeek)
   const plannedMeta: PlannedWeekMeta | undefined = plan.plannedWeeks?.find(
@@ -212,6 +250,10 @@ export function Dashboard({ plan, onboarding, onPlanUpdate, onReset }: Dashboard
               </div>
             </CardContent>
           </Card>
+
+          {weatherLine ? (
+            <p className="text-xs text-muted-foreground px-0.5">{weatherLine}</p>
+          ) : null}
 
           <Button variant="outline" onClick={onReset} className="w-full">
             Start New Plan

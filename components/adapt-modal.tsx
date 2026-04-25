@@ -104,6 +104,7 @@ export function AdaptModal({
           currentWeekNumber,
           profile: { onboarding, plan },
           allWeeks: plan.weeks,
+          city: "Montevideo",
         }),
       })
       const raw = await res.json().catch(() => ({}))

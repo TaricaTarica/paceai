@@ -2,6 +2,7 @@ import { createGateway } from "@ai-sdk/gateway"
 import { generateObject } from "ai"
 import { z } from "zod"
 import { adaptWeekResponseSchema } from "@/lib/adapt-week-schema"
+import { tryWeatherContextViaMcp } from "@/lib/weather-via-mcp-client"
 
 const gateway = createGateway({
   apiKey: process.env.AI_GATEWAY_API_KEY,
@@ -33,6 +34,7 @@ const BodySchema = z.object({
   currentWeekNumber: z.number().int().positive(),
   profile: z.unknown(),
   allWeeks: z.array(weekInputSchema),
+  city: z.string().optional(),
 })
 
 type WeekInput = z.infer<typeof weekInputSchema>
@@ -69,6 +71,51 @@ function buildCompletedSessions(allWeeks: WeekInput[], currentWeekNumber: number
   return out
 }
 
+interface WttrDayBrief {
+  maxtempC: string
+  hourly?: Array<{
+    precipMM?: string
+    weatherDesc?: Array<{ value?: string }>
+  }>
+}
+
+interface WttrJ1Brief {
+  weather?: WttrDayBrief[]
+}
+
+async function buildWeatherContextFromWttr(city: string): Promise<string> {
+  let weatherContext = ""
+  try {
+    const weatherRes = await fetch(`https://wttr.in/${encodeURIComponent(city)}?format=j1`, {
+      headers: { "User-Agent": "PaceAI/1.0" },
+    })
+    if (weatherRes.ok) {
+      const weatherData = (await weatherRes.json()) as WttrJ1Brief
+      const next7Days =
+        weatherData.weather?.slice(0, 7).map((day, i) => {
+          const date = new Date()
+          date.setDate(date.getDate() + i)
+          return {
+            date: date.toISOString().split("T")[0],
+            maxTempC: parseInt(day.maxtempC, 10),
+            precipMM: parseFloat(day.hourly?.[4]?.precipMM ?? "0"),
+            description: day.hourly?.[4]?.weatherDesc?.[0]?.value ?? "",
+          }
+        }) ?? []
+      weatherContext = `\nWEATHER FORECAST FOR ${city.toUpperCase()} (next 7 days):\n${JSON.stringify(next7Days, null, 2)}\nConsider weather when scheduling sessions — move hard sessions away from rain/heat days.`
+    }
+  } catch {
+    // fail silently
+  }
+  return weatherContext
+}
+
+async function buildWeatherContext(city: string): Promise<string> {
+  const viaMcp = await tryWeatherContextViaMcp(city)
+  if (viaMcp) return viaMcp
+  return buildWeatherContextFromWttr(city)
+}
+
 export async function POST(req: Request) {
   let json: unknown
   try {
@@ -82,13 +129,19 @@ export async function POST(req: Request) {
     return Response.json({ error: "Invalid request", details: parsed.error.flatten() }, { status: 400 })
   }
 
-  const { feeling, userContext, triggeredDay, currentWeekNumber, profile, allWeeks } = parsed.data
+  const { feeling, userContext, triggeredDay, currentWeekNumber, profile, allWeeks, city } = parsed.data
 
   if (!process.env.AI_GATEWAY_API_KEY) {
     return Response.json({ error: "AI_GATEWAY_API_KEY is not configured" }, { status: 503 })
   }
 
   const completedSessions = buildCompletedSessions(allWeeks, currentWeekNumber)
+
+  let weatherContext = ""
+  const cityTrimmed = city?.trim()
+  if (cityTrimmed) {
+    weatherContext = await buildWeatherContext(cityTrimmed)
+  }
 
   try {
     const { object } = await generateObject({
@@ -110,7 +163,7 @@ Each session in your output uses only type, distanceKm, and optional description
 - Full plan weeks: ${JSON.stringify(allWeeks)}
 - Completed or assumed-done sessions (for context — do not remove history): ${JSON.stringify(completedSessions)}
 
-Adapt starting from week ${currentWeekNumber}, especially ${triggeredDay}. Output reasoning, the full adapted current week (7 days), optional changes for up to 2 upcoming weeks, and coachMessage.`,
+Adapt starting from week ${currentWeekNumber}, especially ${triggeredDay}. Output reasoning, the full adapted current week (7 days), optional changes for up to 2 upcoming weeks, and coachMessage.${weatherContext}`,
     })
 
     return Response.json(object)
